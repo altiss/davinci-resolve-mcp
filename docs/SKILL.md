@@ -268,6 +268,34 @@ Example trace shape returned by `resolve_control(action="get_execution_trace")`:
 Explicit correlation is also supported per-call: pass `params={"execution_id": ...}`
 or `params={"trace_id": ...}` in any tool call to associate it with a specific trace.
 
+### Agent Tool Execution Lifecycle & Pre-flight Inspection
+
+Every tool call dispatched through the compound server flows through a modular
+lifecycle pipeline:
+
+1. **Pre-flight (`run_before`)**:
+   - **`RiskClassificationHook`**: Computes `risk` (low, medium, high, critical),
+     `blast_radius` (item, track, timeline, project, system), and whether explicit
+     confirmation or state snapshots are required.
+   - **`ResolveStateInspectionHook`**: Captures pre-flight project and timeline
+     state (item count, duration, active track count) without blocking.
+   - **`DryRunInterceptionHook`**: Intercepts `dry_run: true` on actions that
+     lack native dry-run support, safely returning an impact preview without mutating Resolve.
+2. **Execution (`run_on_error`)**: Captures failures, exceptions, and execution duration.
+3. **Post-flight (`run_after`)**:
+   - **`ReadbackVerificationHook`**: Inspects readback verification payloads and
+     flags contradictions or unverified destructive operations.
+   - **`DriftDetectionHook`**: Detects unintended timeline duration or structure
+     drifts caused by operations.
+   - **`ProvenanceTraceHook`**: Connects tool execution and results to the active
+     trace context.
+
+Pre-flight inspection is directly queryable via `resolve_control`:
+- **`inspect_operation(tool?, target_action?, target_params?)`**:
+  Inspects the risk, blast radius, destructive status, and pre-flight state of an
+  intended action before executing it.
+- **`list_lifecycle_hooks()`**: Lists all active lifecycle hooks and their enabled status.
+
 ---
 
 ## Two Server Modes

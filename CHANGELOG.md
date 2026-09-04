@@ -23,8 +23,18 @@ Execution traces and observability translating Strands-style agent observability
     execution trace and compute aggregated rollups.
   - `clear_executions(dry_run?)`: Reset the in-memory execution trace buffer.
 - **Direct Python API**: Exported `get_execution_trace`, `get_execution`,
-  `list_recent_executions`, `begin_execution`, `end_execution`, `clear_executions`
-  from `src/utils/execution_trace` and `src/server`.
+  `list_recent_executions`, `begin_execution`, `end_execution`, `clear_executions`,
+  `inspect_operation`, `list_lifecycle_hooks`
+  from `src/utils/execution_trace`, `src/utils/execution_lifecycle`, and `src/server`.
+- **Agent Tool Execution Lifecycle & Hook System**:
+  - Pre-flight, execution, and post-flight lifecycle pipeline on all compound tool calls.
+  - `RiskClassificationHook`: Automatic classification of risk levels (`low`, `medium`, `high`, `critical`)
+    and blast radius (`item`, `track`, `timeline`, `project`, `system`).
+  - `ResolveStateInspectionHook`: Non-blocking pre-flight capture of timeline frame duration, track counts, and project state.
+  - `DryRunInterceptionHook`: Safe simulation interception for actions lacking native dry-run support.
+  - `ReadbackVerificationHook`: Contradiction analysis and unverified destructive operation tracking.
+  - `DriftDetectionHook`: Timeline duration and structure shift warning detection.
+  - New `resolve_control` actions: `inspect_operation` (pre-flight risk/blast-radius inspection) and `list_lifecycle_hooks`.
 
 ### Notes on tracing and observability
 

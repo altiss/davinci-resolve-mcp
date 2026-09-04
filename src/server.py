@@ -75,6 +75,11 @@ from src.utils.execution_trace import (
     end_execution,
     clear_executions,
 )
+from src.utils import execution_lifecycle as _execution_lifecycle
+from src.utils.execution_lifecycle import (
+    inspect_operation,
+    list_lifecycle_hooks,
+)
 from src.utils.render_ids import (
     render_codec_id_from_codecs as _render_codec_id_from_codecs,
     render_format_id_from_formats as _render_format_id_from_formats,
@@ -1093,6 +1098,39 @@ def _destructive_versioning_provider() -> Optional[Tuple[Any, Any, str, Optional
 _destructive_hook.register_project_root_provider(_destructive_versioning_provider)
 
 
+def _lifecycle_state_provider() -> Optional[Dict[str, Any]]:
+    """State provider for the agent tool execution lifecycle."""
+    try:
+        r = get_resolve()
+        if r is None:
+            return None
+        pm = r.GetProjectManager()
+        if pm is None:
+            return None
+        proj = pm.GetCurrentProject()
+        if proj is None:
+            return None
+        project_name = proj.GetName() if _has_method(proj, "GetName") else None
+        tl = proj.GetCurrentTimeline()
+        timeline_name = tl.GetName() if tl and _has_method(tl, "GetName") else None
+        track_count = tl.GetTrackCount("video") if tl and _has_method(tl, "GetTrackCount") else None
+        start_frame = tl.GetStartFrame() if tl and _has_method(tl, "GetStartFrame") else None
+        end_frame = tl.GetEndFrame() if tl and _has_method(tl, "GetEndFrame") else None
+        duration_frames = (end_frame - start_frame) if (end_frame is not None and start_frame is not None) else None
+        return {
+            "project": project_name,
+            "timeline": timeline_name,
+            "track_count_video": track_count,
+            "duration_frames": duration_frames,
+        }
+    except Exception as exc:
+        logger.debug("lifecycle state provider failed: %s", exc)
+        return None
+
+
+_execution_lifecycle.get_lifecycle_pipeline().set_state_provider(_lifecycle_state_provider)
+
+
 # ─── Resolve 21 AI-ops ledger plumbing ────────────────────────────────────────
 
 import uuid as _ledger_uuid
@@ -1499,6 +1537,7 @@ def _guarded_params(args, kwargs) -> Optional[Dict[str, Any]]:
 _TRACE_OBSERVER_ACTIONS = {
     "get_execution_trace", "get_execution", "list_recent_executions",
     "clear_executions", "begin_execution", "end_execution",
+    "inspect_operation", "list_lifecycle_hooks",
 }
 
 
@@ -1571,12 +1610,30 @@ def _guard_missing_params(fn):
         async def wrapper(*args, **kwargs):
             action = _guarded_action_name(args, kwargs)
             params = _guarded_params(args, kwargs)
-            t0 = time.perf_counter()
-            try:
-                result = await fn(*args, **kwargs)
-            except _MissingParam as exc:
-                result = _missing_param_error(exc, action)
-            duration_ms = max(0, int((time.perf_counter() - t0) * 1000))
+            exec_id = (params or {}).get("execution_id") or (params or {}).get("_execution_id") or (params or {}).get("trace_id")
+            ctx = _execution_lifecycle.ToolCallContext(
+                tool_name=tool_name,
+                action=action,
+                params=params if isinstance(params, dict) else {},
+                execution_id=exec_id,
+            )
+            decision = _execution_lifecycle.get_lifecycle_pipeline().run_before(ctx)
+            if not decision.proceed and decision.short_circuit_result is not None:
+                result = decision.short_circuit_result
+                duration_ms = 0
+            else:
+                t0 = time.perf_counter()
+                try:
+                    result = await fn(*args, **kwargs)
+                except _MissingParam as exc:
+                    result = _missing_param_error(exc, action)
+                except Exception as exc:
+                    duration_ms = max(0, int((time.perf_counter() - t0) * 1000))
+                    _execution_lifecycle.get_lifecycle_pipeline().run_on_error(ctx, exc, duration_ms)
+                    raise
+                duration_ms = max(0, int((time.perf_counter() - t0) * 1000))
+                result = _execution_lifecycle.get_lifecycle_pipeline().run_after(ctx, result, duration_ms)
+
             enveloped = _build_operation_envelope(
                 tool_name, action, params, result, duration_ms=duration_ms)
             _record_execution_step(tool_name, action, params, result, enveloped, duration_ms)
@@ -1586,12 +1643,30 @@ def _guard_missing_params(fn):
         def wrapper(*args, **kwargs):
             action = _guarded_action_name(args, kwargs)
             params = _guarded_params(args, kwargs)
-            t0 = time.perf_counter()
-            try:
-                result = fn(*args, **kwargs)
-            except _MissingParam as exc:
-                result = _missing_param_error(exc, action)
-            duration_ms = max(0, int((time.perf_counter() - t0) * 1000))
+            exec_id = (params or {}).get("execution_id") or (params or {}).get("_execution_id") or (params or {}).get("trace_id")
+            ctx = _execution_lifecycle.ToolCallContext(
+                tool_name=tool_name,
+                action=action,
+                params=params if isinstance(params, dict) else {},
+                execution_id=exec_id,
+            )
+            decision = _execution_lifecycle.get_lifecycle_pipeline().run_before(ctx)
+            if not decision.proceed and decision.short_circuit_result is not None:
+                result = decision.short_circuit_result
+                duration_ms = 0
+            else:
+                t0 = time.perf_counter()
+                try:
+                    result = fn(*args, **kwargs)
+                except _MissingParam as exc:
+                    result = _missing_param_error(exc, action)
+                except Exception as exc:
+                    duration_ms = max(0, int((time.perf_counter() - t0) * 1000))
+                    _execution_lifecycle.get_lifecycle_pipeline().run_on_error(ctx, exc, duration_ms)
+                    raise
+                duration_ms = max(0, int((time.perf_counter() - t0) * 1000))
+                result = _execution_lifecycle.get_lifecycle_pipeline().run_after(ctx, result, duration_ms)
+
             enveloped = _build_operation_envelope(
                 tool_name, action, params, result, duration_ms=duration_ms)
             _record_execution_step(tool_name, action, params, result, enveloped, duration_ms)
@@ -16108,6 +16183,10 @@ def resolve_control(action: str, params: Optional[Dict[str, Any]] = None) -> Dic
         — Conclude an execution trace and compute final rollups.
       clear_executions(dry_run?) -> {success, cleared}
         — Clear the in-memory execution trace buffer.
+      inspect_operation(tool?, target_action?, target_params?) -> {tool, action, risk, destructive, blast_radius, confirmation_required, snapshot_available, reasons, pre_state}
+        — Pre-flight risk assessment and blast radius inspection for any tool action before execution (no connection needed).
+      list_lifecycle_hooks() -> {success, hooks, count}
+        — List active agent tool execution lifecycle hooks and their enabled status.
     """
     p = _params(params)
 
@@ -16231,6 +16310,14 @@ def resolve_control(action: str, params: Optional[Dict[str, Any]] = None) -> Dic
             return {"success": True, "dry_run": True, "count": len(_execution_trace.list_recent_executions(100))}
         res = _execution_trace.clear_executions()
         return res
+    if action == "inspect_operation":
+        target_tool = p.get("tool") or p.get("tool_name") or "timeline"
+        target_action = p.get("target_action") or p.get("action") or p.get("op") or "delete_clips"
+        target_params = p.get("target_params") or p.get("params") or {}
+        return _execution_lifecycle.inspect_operation(target_tool, target_action, target_params)
+    if action == "list_lifecycle_hooks":
+        hooks = _execution_lifecycle.list_lifecycle_hooks()
+        return {"success": True, "hooks": hooks, "count": len(hooks)}
 
     # Control-panel actions don't require Resolve to be running.
     if action == "open_control_panel":
@@ -16446,7 +16533,7 @@ def resolve_control(action: str, params: Optional[Dict[str, Any]] = None) -> Dic
         if err:
             return _err(err)
         return {"success": bool(r.ExportUserPreferencesPreset(clean["name"], clean["path"]))}
-    return _unknown(action, ["launch","runtime_mode","get_version","api_truth","check_version_support","verification_stats","job_status","list_jobs","get_execution_trace","get_execution","list_recent_executions","begin_execution","end_execution","clear_executions","mcp_update_status","set_mcp_update_policy","ignore_mcp_update","snooze_mcp_update","clear_mcp_update_preferences","get_page","open_page","get_keyframe_mode","set_keyframe_mode","quit","get_fairlight_presets","set_high_priority","disable_background_tasks_for_current_session","list_user_preferences_presets","save_user_preferences_preset","load_user_preferences_preset","delete_user_preferences_preset","import_user_preferences_preset","export_user_preferences_preset","open_control_panel","control_panel_status","close_control_panel","save_state","restore_state"])
+    return _unknown(action, ["launch","runtime_mode","get_version","api_truth","check_version_support","verification_stats","job_status","list_jobs","get_execution_trace","get_execution","list_recent_executions","begin_execution","end_execution","clear_executions","inspect_operation","list_lifecycle_hooks","mcp_update_status","set_mcp_update_policy","ignore_mcp_update","snooze_mcp_update","clear_mcp_update_preferences","get_page","open_page","get_keyframe_mode","set_keyframe_mode","quit","get_fairlight_presets","set_high_priority","disable_background_tasks_for_current_session","list_user_preferences_presets","save_user_preferences_preset","load_user_preferences_preset","delete_user_preferences_preset","import_user_preferences_preset","export_user_preferences_preset","open_control_panel","control_panel_status","close_control_panel","save_state","restore_state"])
 
 
 # ─── V2 C4: Per-field corrections with provenance + changelog ────────────────

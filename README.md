@@ -252,7 +252,7 @@ confirm gate's `status: "confirmation_required"`. `setup(action="set_defaults",
 params={"result_envelope": "pure" | "legacy"})` changes the shape, per call via
 `params={"envelope": ...}`, per process via `RESOLVE_MCP_RESULT_ENVELOPE`.
 
-### Agent execution traces ("Why did the editor do this?")
+### Agent execution traces ("Why did the editor do this?") & Execution Lifecycle
 
 Multi-step AI operations correlate across tool calls into unified execution
 traces. Each trace aggregates tool durations (`duration_ms`), call counts, cumulative
@@ -260,6 +260,12 @@ semantic deltas (`items_deleted`, `items_added`), and readback verifications.
 Agents and editors can inspect workflows via `resolve_control`:
 `get_execution_trace(execution_id?)`, `list_recent_executions()`, or open a
 scoped execution with `begin_execution(request="...")` / `end_execution()`.
+
+A modular execution lifecycle pipeline safeguards operations with pre-flight risk
+classification (`low`, `medium`, `high`, `critical`), blast radius inspection
+(`item`, `track`, `timeline`, `project`, `system`), state capture, safe dry-run
+simulation interception, and post-flight drift detection. Query risk and impact
+pre-flight with `resolve_control(action="inspect_operation", params={...})`.
 
 ## Optional Extras
 
